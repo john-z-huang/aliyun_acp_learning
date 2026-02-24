@@ -1,72 +1,66 @@
+import os
+import requests
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
-from pydantic import Field
-from llama_index.core.postprocessor.types import BaseNodePostprocessor
-from llama_index.core.schema import NodeWithScore
-from llama_index.core import QueryBundle
-
+from llama_index.core.postprocessor.types import BaseNodePostprocessor 
+from llama_index.core.postprocessor import SimilarityPostprocessor
+from llama_index.core.schema import NodeWithScore, QueryBundle
 
 class OpenAILikeRerank:
     """
-    A simple client for an OpenAI-compatible rerank endpoint.
-
-    It assumes your server exposes a /rerank endpoint that accepts:
-      - model: model name
-      - query: query string
-      - documents: list of document strings
-      - top_n: number of results to return
-
-    and returns a JSON with a "results" field like:
-      [
-          {"index": 2, "score": 0.98},
-          {"index": 0, "score": 0.85},
-          ...
-      ]
+    使用 requests 调用 DashScope OpenAI 兼容的 Rerank 接口。
     """
 
     def __init__(self, api_base: str, api_key: str, model_name: str):
-        self.client = OpenAI(
-            base_url=api_base,
-            api_key=api_key,
-        )
+        self.api_base = api_base.rstrip("/")
+        self.api_key = api_key
         self.model_name = model_name
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        })
 
     def rerank(self, query: str, documents: List[str], top_n: int) -> List[Dict[str, Any]]:
-        """
-        Call the OpenAI-compatible rerank endpoint.
+        url = f"{self.api_base}/reranks"
 
-        Args:
-            query: query string
-            documents: list of document texts
-            top_n: number of items to keep
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
 
-        Returns:
-            A list of dicts with at least:
-                - index: original document index
-                - score: relevance score
-        """
-        response = self.client.post(
-            "/rerank",
-            json={
-                "model": self.model_name,
-                "query": query,
-                "documents": documents,
-                "top_n": top_n,
-            },
-        )
-        data = response.json()
-        return data["results"]
+        try:
+            resp = self.session.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # 兼容接口：results 在根目录
+            results = data.get("results") 
+            if not results:
+                results = data.get("output", {}).get("results", [])
+            
+            if not results:
+                return []
+
+            return [{
+                "index": item.get("index", i),
+                "score": item.get("relevance_score", item.get("score", 0.0))
+            } for i, item in enumerate(results)]
+
+        except Exception as e:
+            print(f"[OpenAILikeRerank] API Request Failed: {e}")
+            if 'resp' in locals():
+                print(f"Response Text: {resp.text}")
+            raise RuntimeError(f"Rerank API error: {str(e)}")
 
 
 class OpenAILikeRerankPostprocessor(BaseNodePostprocessor):
     """
-    LlamaIndex node postprocessor that uses an OpenAI-compatible rerank service
-    to reorder retrieved nodes.
+    LlamaIndex node postprocessor that uses the fixed Rerank client.
     """
-
-    # Declare fields explicitly for Pydantic compatibility
-    rerank_client: OpenAILikeRerank = Field(...)
-    top_n: int = Field(default=3)
+    rerank_client: OpenAILikeRerank
+    top_n: int = 3
 
     def _postprocess_nodes(
         self,
@@ -91,14 +85,15 @@ class OpenAILikeRerankPostprocessor(BaseNodePostprocessor):
             print(f"[OpenAILikeRerankPostprocessor] rerank failed, skip. Error: {e}")
             return nodes
 
-        # rerank_results: [{"index": i, "score": s}, ...]
         index_to_score = {
-            r["index"]: r.get("score", r.get("relevance_score", 0.0))
+            r["index"]: r.get("score", 0.0)
             for r in rerank_results
         }
 
         new_nodes: List[NodeWithScore] = []
-        for idx, score in sorted(index_to_score.items(), key=lambda x: x[1], reverse=True):
+        sorted_indices = sorted(index_to_score.items(), key=lambda x: x[1], reverse=True)
+        
+        for idx, score in sorted_indices:
             if 0 <= idx < len(nodes):
                 n = nodes[idx]
                 new_nodes.append(NodeWithScore(node=n.node, score=score))
