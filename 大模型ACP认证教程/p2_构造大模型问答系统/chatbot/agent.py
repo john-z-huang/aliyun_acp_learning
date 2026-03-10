@@ -1,5 +1,5 @@
 import os
-from typing import Iterable
+from typing import Iterable, Literal
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import (
@@ -14,6 +14,8 @@ def create_agent(
     sys_prompt: str,
     model_name: str = "qwen-plus",
     multi_agent: bool = True,
+    long_term_memory: object | None = None,
+    long_term_memory_mode: Literal["static_control", "agent_control"] | None = None,
 ) -> ReActAgent:
     """Create a ReActAgent with a DashScope chat model.
 
@@ -36,6 +38,8 @@ def create_agent(
         sys_prompt=sys_prompt,
         model=model,
         formatter=formatter,
+        long_term_memory=long_term_memory,
+        long_term_memory_mode=long_term_memory_mode,
     )
 
 
